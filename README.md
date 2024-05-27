@@ -1,4 +1,4 @@
 # NanoGPT
-NanoGPT model inspired by Andrey Karpathy
+NanoGPT model inspired by Andrej Karpathy
 
 ![nanoGPT](nano_gpt_cover.png)
