@@ -82,12 +82,52 @@ class Head(nn.Module):
         q = self.query(x)   # (B, T, C)
         # Compute attention scores ("affinities")
         wei = q @ k.transpose(-2, -1) * C**-0.5  # (B, T, C) @ (B, C, T) = (B, T, T)
-        wei = wei.masked_fill(self.tril[:T, :T] == 0, float('-inf')) # (B, T, T)
+        wei = wei.masked_fill(self.tril[:T, :T] == 0, float('-inf'))  # (B, T, T)
         wei = F.softmax(wei, dim=-1)  # (B, T, T)
         # Weighted aggregation of the values
         v = self.value(x)  # (B, T, C)
         out = wei @ v      # (B, T, T) @ (B, T, C) = (B, T, C)
         return out
+
+
+class MultiHeadAttention(nn.Module):
+    """Multiple heads fo self-attention, in parallel."""
+    def __init__(self, num_heads, head_size):
+        super().__init__()
+        self.heads = nn.ModuleList([Head(head_size) for _ in range(num_heads)])
+
+    def forward(self, x):
+        # remember the output of each head is (B, T, C) so here we are concatenating the output on the final dimension
+        # thus obtaining (B, T, num_heads*C)
+        return torch.cat([h(x) for h in self.heads], dim=-1)
+
+
+class FeedForward(nn.Module):
+    """A simple linear layer followed by a non-linearity"""
+    def __init__(self, n_embd):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(n_embd, n_embd),
+            nn.ReLU()
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+
+class Block(nn.Module):
+    """Transformer block: communication followed by computation."""
+    def __init__(self, n_embd, n_head):
+        """Here n_embd is the embedding dimension and n_head is the number of heads."""
+        super().__init__()
+        head_size = n_embd // n_head
+        self.sa = MultiHeadAttention(num_heads=n_head, head_size=head_size)
+        self.ffwd = FeedForward(n_embd)
+
+    def forward(self, x):
+        x = self.sa(x)
+        x = self.ffwd(x)
+        return x
 
 
 class BigramLanguageModel(nn.Module):
@@ -103,7 +143,11 @@ class BigramLanguageModel(nn.Module):
         # We now also encode the position. Each position from 0 to block_size-1 will have a corresponding embedding
         self.position_embedding_table = nn.Embedding(block_size, n_embd)
         self.lm_head = nn.Linear(n_embd, vocab_size)  # lm=language model
-        self.sa_head = Head(n_embd)
+        # We try and keep the same number of parameters as before
+        self.sa_heads = MultiHeadAttention(num_heads=4, head_size=n_embd//4)
+        # Feed forward NN. This will be per-token level, meaning each data out of the attention will be processed
+        # independently
+        self.ffwd = FeedForward(n_embd)
 
     def forward(self, idx, targets=None):
         """Forward pass. Takes `idx` and `targets` which are both `(B, T)` tensors of integers.
@@ -115,7 +159,8 @@ class BigramLanguageModel(nn.Module):
         tok_emb = self.token_embedding_table(idx)  # (B, T, C=embedding_dimension), these re token embeddings now.
         pos_emb = self.position_embedding_table(torch.arange(T, device=device))  # (T, C)
         x = tok_emb + pos_emb  # (B, T, C)
-        x = self.sa_head(x)
+        x = self.sa_heads(x)
+        x = self.ffwd(x)
         logits = self.lm_head(x)  # (B, T, vocab_size)
 
         # Negative log-likelihood loss (cross-entropy). Importantly, when working with multi-dimensional inputs,
