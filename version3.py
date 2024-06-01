@@ -142,12 +142,13 @@ class BigramLanguageModel(nn.Module):
         self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
         # We now also encode the position. Each position from 0 to block_size-1 will have a corresponding embedding
         self.position_embedding_table = nn.Embedding(block_size, n_embd)
+        # Transformer
+        self.blocks = nn.Sequential(
+            Block(n_embd, n_head=4),
+            Block(n_embd, n_head=4),
+            Block(n_embd, n_head=4)
+        )
         self.lm_head = nn.Linear(n_embd, vocab_size)  # lm=language model
-        # We try and keep the same number of parameters as before
-        self.sa_heads = MultiHeadAttention(num_heads=4, head_size=n_embd//4)
-        # Feed forward NN. This will be per-token level, meaning each data out of the attention will be processed
-        # independently
-        self.ffwd = FeedForward(n_embd)
 
     def forward(self, idx, targets=None):
         """Forward pass. Takes `idx` and `targets` which are both `(B, T)` tensors of integers.
@@ -159,8 +160,7 @@ class BigramLanguageModel(nn.Module):
         tok_emb = self.token_embedding_table(idx)  # (B, T, C=embedding_dimension), these re token embeddings now.
         pos_emb = self.position_embedding_table(torch.arange(T, device=device))  # (T, C)
         x = tok_emb + pos_emb  # (B, T, C)
-        x = self.sa_heads(x)
-        x = self.ffwd(x)
+        x = self.blocks(x)  # (B, T, C)
         logits = self.lm_head(x)  # (B, T, vocab_size)
 
         # Negative log-likelihood loss (cross-entropy). Importantly, when working with multi-dimensional inputs,
