@@ -95,11 +95,15 @@ class MultiHeadAttention(nn.Module):
     def __init__(self, num_heads, head_size):
         super().__init__()
         self.heads = nn.ModuleList([Head(head_size) for _ in range(num_heads)])
+        self.proj = nn.Linear(n_embd, n_embd)
 
     def forward(self, x):
         # remember the output of each head is (B, T, C) so here we are concatenating the output on the final dimension
         # thus obtaining (B, T, num_heads*C)
-        return torch.cat([h(x) for h in self.heads], dim=-1)
+        out = torch.cat([h(x) for h in self.heads], dim=-1)
+        # linear projection of the output
+        out = self.proj(out)
+        return out
 
 
 class FeedForward(nn.Module):
@@ -107,9 +111,12 @@ class FeedForward(nn.Module):
     def __init__(self, n_embd):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(n_embd, n_embd),
-            nn.ReLU()
+            nn.Linear(n_embd, 4 * n_embd),  # see
+            nn.ReLU(),
+            nn.Linear(4 * n_embd, n_embd)
         )
+        # to understand why 4*n_embd see section 3.3 "Position-wise Feed-Forward Networks" in the
+        # "Attention is All You Need" paper. There n_embd=512 and dff=2048
 
     def forward(self, x):
         return self.net(x)
@@ -125,8 +132,8 @@ class Block(nn.Module):
         self.ffwd = FeedForward(n_embd)
 
     def forward(self, x):
-        x = self.sa(x)
-        x = self.ffwd(x)
+        x = x + self.sa(x)    # self-attention + residual connection
+        x = x + self.ffwd(x)  # feed-forward + residual connection
         return x
 
 
