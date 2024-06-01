@@ -4,14 +4,18 @@ from torch.nn import functional as F
 torch.manual_seed(1337)
 
 # Hyperparameters
-batch_size = 32
-block_size = 8
+batch_size = 64
+block_size = 256
 max_iters = 5000
 eval_interval = 500
-learning_rate = 1e-3
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
+learning_rate = 3e-4
+device = 'mps' if torch.backends.mps.is_available() else 'cpu'
+print("DEVICE: ", device)
 eval_iters = 200
-n_embd = 32
+n_embd = 384  # each head is 384//6 = 64 dimensional, which is standard
+n_layers = 6
+n_head = 6
+dropout = 0.2  # 20% of neurons are dropped out
 
 # If you are using a Conda environment generated from scratch, you will need to run
 # `conda install jupyter` and `conda install wget`
@@ -75,6 +79,8 @@ class Head(nn.Module):
         self.value = nn.Linear(n_embd, head_size, bias=False)
         # Basically, using register buffer it is not treated as a parameter
         self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size)))
+        # randomly prevent some of the nodes from communicating with a dropout
+        self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
         B, T, C = x.shape
@@ -84,6 +90,7 @@ class Head(nn.Module):
         wei = q @ k.transpose(-2, -1) * C**-0.5  # (B, T, C) @ (B, C, T) = (B, T, T)
         wei = wei.masked_fill(self.tril[:T, :T] == 0, float('-inf'))  # (B, T, T)
         wei = F.softmax(wei, dim=-1)  # (B, T, T)
+        wei = self.dropout(wei)
         # Weighted aggregation of the values
         v = self.value(x)  # (B, T, C)
         out = wei @ v      # (B, T, T) @ (B, T, C) = (B, T, C)
@@ -96,6 +103,7 @@ class MultiHeadAttention(nn.Module):
         super().__init__()
         self.heads = nn.ModuleList([Head(head_size) for _ in range(num_heads)])
         self.proj = nn.Linear(n_embd, n_embd)
+        self.dropout = nn.Dropout(dropout) # add a dropout typically added right before the residual connection.
 
     def forward(self, x):
         # remember the output of each head is (B, T, C) so here we are concatenating the output on the final dimension
@@ -103,6 +111,8 @@ class MultiHeadAttention(nn.Module):
         out = torch.cat([h(x) for h in self.heads], dim=-1)
         # linear projection of the output
         out = self.proj(out)
+        # dropout before residual/skip connection
+        out = self.dropout(out)
         return out
 
 
@@ -113,7 +123,9 @@ class FeedForward(nn.Module):
         self.net = nn.Sequential(
             nn.Linear(n_embd, 4 * n_embd),  # see
             nn.ReLU(),
-            nn.Linear(4 * n_embd, n_embd)
+            nn.Linear(4 * n_embd, n_embd),
+            # add a dropout typically added right before the residual connection.
+            nn.Dropout(dropout)
         )
         # to understand why 4*n_embd see section 3.3 "Position-wise Feed-Forward Networks" in the
         # "Attention is All You Need" paper. There n_embd=512 and dff=2048
@@ -130,10 +142,12 @@ class Block(nn.Module):
         head_size = n_embd // n_head
         self.sa = MultiHeadAttention(num_heads=n_head, head_size=head_size)
         self.ffwd = FeedForward(n_embd)
+        self.ln1 = nn.LayerNorm(n_embd)  # per-token transformation that normalizes the features
+        self.ln2 = nn.LayerNorm(n_embd)
 
     def forward(self, x):
-        x = x + self.sa(x)    # self-attention + residual connection
-        x = x + self.ffwd(x)  # feed-forward + residual connection
+        x = x + self.sa(self.ln1(x))    # layer norm + self-attention + residual connection
+        x = x + self.ffwd(self.ln2(x))  # layer norm + feed-forward + residual connection
         return x
 
 
@@ -150,11 +164,8 @@ class BigramLanguageModel(nn.Module):
         # We now also encode the position. Each position from 0 to block_size-1 will have a corresponding embedding
         self.position_embedding_table = nn.Embedding(block_size, n_embd)
         # Transformer
-        self.blocks = nn.Sequential(
-            Block(n_embd, n_head=4),
-            Block(n_embd, n_head=4),
-            Block(n_embd, n_head=4)
-        )
+        self.blocks = nn.Sequential(*[Block(n_embd, n_head=n_head) for _ in range(n_layers)])
+        self.ln_f = nn.LayerNorm(n_embd)  # there should always be a layer norm at the end of the transformer but before the final linear layer
         self.lm_head = nn.Linear(n_embd, vocab_size)  # lm=language model
 
     def forward(self, idx, targets=None):
